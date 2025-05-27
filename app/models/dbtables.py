@@ -63,9 +63,10 @@ class UserSessions(SQLModel, table=True):
     )
 
 
+# TODO: Make this self-referential so groups can have child/parent groups
 class PasswordGroups(SQLModel, table=True):
     group_id: uuid.UUID = Field(primary_key=True, default_factory=uuid.uuid4)
-    group_name: str = Field(min_length=1, nullable=False)
+    group_name: str = Field(min_length=1, nullable=False, index=True)
 
     user_id: uuid.UUID = Field(foreign_key='users.user_id', ondelete='CASCADE')
 
@@ -75,17 +76,20 @@ class PasswordGroups(SQLModel, table=True):
         passive_deletes='all'
     )
     user: Users = Relationship(
-        back_populates='sessions', 
+        back_populates='groups', 
         sa_relationship_kwargs={'lazy': 'selectin'}
     )
 
 
+# TODO: Add metadata and encryption
 class PasswordEntry(SQLModel, table=True):
     entry_id: uuid.UUID = Field(primary_key=True, default_factory=uuid.uuid4)
-    entry_name: str = Field(min_length=1, nullable=False)
+    entry_name: str = Field(min_length=1, nullable=False, index=True)
+
+    entry_data: str = Field(min_length=1, nullable=False)
 
     group_id: uuid.UUID = Field(foreign_key='passwordgroups.group_id', ondelete='CASCADE')
-    entry: PasswordGroups = Relationship(
+    group: PasswordGroups = Relationship(
         back_populates='entries',
         sa_relationship_kwargs={'lazy': 'selectin'}
     )

@@ -3,14 +3,13 @@ import logging
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Path
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .models.common import UserInfo
-
+from .models.groups import GroupName
 from .internal.database import async_engine, database
-from .internal.config import settings
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/api/auth/token')
@@ -42,7 +41,22 @@ async def get_current_user(session: 'SessionDep', token: str = Depends(oauth2_sc
     return user_info
 
 
+async def check_group_is_valid(
+    session: 'SessionDep', user: 'UserAuthDep', 
+    group_name: Annotated[GroupName, Path()]
+) -> str:
+    group_exists: bool = await database.groups.check_group_exists(
+        session, user.username, group_name
+    )
+    if not group_exists:
+        raise HTTPException(status_code=400, detail="Parent group is invalid")
+
+    return group_name
+
+
 UserAuthDep = Annotated[UserInfo, Depends(get_current_user)]
 
 LoggerDep = Annotated[logging.Logger, Depends(get_logger)]
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+CheckGroupValidDep = Annotated[GroupName, Depends(check_group_is_valid)]
