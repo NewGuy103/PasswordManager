@@ -90,7 +90,7 @@ class LogConfigManager:
                     'stream': 'ext://sys.stdout',
                     'formatter': 'default'
                 },
-                "syncserver": {
+                "password_manager": {
                     "class": "logging.handlers.RotatingFileHandler",
                     "formatter": "default",
                     "maxBytes": 5 * 1024 * 1024,  # 5 MB
@@ -99,9 +99,9 @@ class LogConfigManager:
                 }
             },
             'loggers': {
-                "syncserver": {
+                "password_manager": {
                     "handlers": [
-                        "syncserver",
+                        "password_manager",
                         "console"
                     ],
                     "level": "INFO",

@@ -63,12 +63,27 @@ class UserSessions(SQLModel, table=True):
     )
 
 
+# Self referential model (https://docs.sqlalchemy.org/en/latest/orm/self_referential.html)
 # TODO: Make this self-referential so groups can have child/parent groups
 class PasswordGroups(SQLModel, table=True):
     group_id: uuid.UUID = Field(primary_key=True, default_factory=uuid.uuid4)
     group_name: str = Field(min_length=1, nullable=False, index=True)
 
     user_id: uuid.UUID = Field(foreign_key='users.user_id', ondelete='CASCADE')
+    parent_id: uuid.UUID | None = Field(foreign_key='passwordgroups.group_id', ondelete='CASCADE')
+
+    is_root: bool = Field(default=False, nullable=False)
+
+    # Self-referential relationships
+    parent_group: Optional['PasswordGroups'] = Relationship(
+        back_populates='child_groups',
+        sa_relationship_kwargs={'lazy': 'selectin', 'remote_side': 'PasswordGroups.group_id'}
+    )
+    child_groups: list['PasswordGroups'] = Relationship(
+        back_populates='parent_group',
+        sa_relationship_kwargs={'lazy': 'selectin'},
+        passive_deletes='all'
+    )
 
     entries: list['PasswordEntry'] = Relationship(
         back_populates='group',

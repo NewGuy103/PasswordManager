@@ -4,19 +4,19 @@ from pydantic import NonNegativeInt, PositiveInt
 from ..deps import UserAuthDep, SessionDep, CheckGroupValidDep
 from ..internal.database import database
 from ..models.common import GenericSuccess
-from ..models.entries import EntryPublicGet, EntryCreate
+from ..models.entries import EntryPublicGet, EntryCreate, EntryReplaceData
 
-# This router is under /groups/{group_name}
+# This router is under /groups/{group_id}
 router = APIRouter(prefix='/entries')
 
 
 @router.post('/')
 async def create_password_entry(
-    group_name: CheckGroupValidDep, data: EntryCreate, 
+    group_id: CheckGroupValidDep, data: EntryCreate, 
     user: UserAuthDep, session: SessionDep
 ) -> EntryPublicGet:
     entry_created: EntryPublicGet | bool = await database.entries.create_entry(
-        session, user.username, group_name,
+        session, user.username, group_id,
         data.entry_name, data.entry_data
     )
     if not entry_created:
@@ -27,12 +27,12 @@ async def create_password_entry(
 
 @router.get('/')
 async def get_group_entries(
-    group_name: CheckGroupValidDep, user: UserAuthDep, 
+    group_id: CheckGroupValidDep, user: UserAuthDep, 
     session: SessionDep, amount: PositiveInt = 100,
     offset: NonNegativeInt = 0
 ) -> list[EntryPublicGet]:
     entries_public: list[EntryPublicGet] | bool = await database.entries.get_entries_by_group(
-        session, user.username, group_name,
+        session, user.username, group_id,
         amount=amount, offset=offset
     )
     
@@ -41,7 +41,7 @@ async def get_group_entries(
 
 @router.delete('/{entry_id}')
 async def delete_password_entry(
-    group_name: CheckGroupValidDep, entry_id: uuid.UUID,
+    group_id: CheckGroupValidDep, entry_id: uuid.UUID,
     user: UserAuthDep, session: SessionDep
 ) -> GenericSuccess:
     entry_deleted: bool = await database.entries.delete_entry_by_id(
@@ -51,3 +51,18 @@ async def delete_password_entry(
         raise HTTPException(status_code=404, detail="Password entry not found")
     
     return {'success': True}
+
+
+@router.patch('/{entry_id}')
+async def change_entry_data(
+    group_id: CheckGroupValidDep, entry_id: uuid.UUID,
+    data: EntryReplaceData,
+    user: UserAuthDep, session: SessionDep
+) -> EntryPublicGet:
+    entry_modified: EntryPublicGet | bool = await database.entries.replace_entry_data(
+        session, user.username, entry_id, data.entry_data
+    )
+    if not entry_modified:
+        raise HTTPException(status_code=404, detail="Password entry not found")
+    
+    return entry_modified

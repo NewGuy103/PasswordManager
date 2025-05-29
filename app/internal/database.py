@@ -10,10 +10,8 @@ import uuid
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from sqlmodel import select, SQLModel
+from sqlmodel import select, SQLModel, true
 from sqlmodel.ext.asyncio.session import AsyncSession
-
-from pydantic import TypeAdapter
 
 from .config import settings
 
@@ -22,7 +20,7 @@ from ..models.common import UserInfo
 from ..models.pwdcontext import pwd_context
 
 from ..models.entries import EntryPublicGet
-from ..models.groups import GroupPublicGet
+from ..models.groups import GroupPublicGet, GroupPublicChildren, GroupPublicModify
 
 if typing.TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -111,7 +109,7 @@ class UserMethods:
         await session.commit()
 
         # Auto-create the Root group
-        await self.parent.groups.create_group(session, username, 'Root')
+        await self.parent.groups.create_group(session, username, 'Root', parent_id=None)
         return True
     
     async def verify_user(self, session: AsyncSession, username: str, password: str) -> str | bool:
@@ -243,54 +241,60 @@ class PasswordGroupMethods:
         self.parent = parent
         self.async_engine = parent.async_engine
 
-    async def create_group(self, session: AsyncSession, username: str, group_name: str) -> GroupPublicGet | bool:
+    async def create_group(
+        self, session: AsyncSession, 
+        username: str, group_name: str,
+        parent_id: uuid.UUID | None = None
+    ) -> GroupPublicModify | bool:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
 
-        result = await session.exec(
-            select(PasswordGroups)
-            .where(
-                PasswordGroups.user_id == user.user_id,
-                PasswordGroups.group_name == group_name
+        # So the 'Root' group can be created without a parent
+        if parent_id:
+            result2 = await session.exec(
+                select(PasswordGroups)
+                .where(
+                    PasswordGroups.user_id == user.user_id,
+                    PasswordGroups.group_id == parent_id
+                )
             )
-        )
-        existing_group = result.one_or_none()
+            parent_model = result2.one()
+            existing_parent_id = parent_model.group_id
+        else:
+            assert group_name == 'Root', 'Cannot create group without parent unless its Root'
+            existing_parent_id = None
 
-        if existing_group:
-            return False
+            result3 = await session.exec(
+                select(PasswordGroups)
+                .where(
+                    PasswordGroups.user_id == user.user_id,
+                    PasswordGroups.is_root == true()
+                )
+            )
+            root_model = result3.one_or_none()
+
+            if root_model:
+                raise RuntimeError("Attempted to recreate top-level group")
         
         new_group = PasswordGroups(
             group_name=group_name,
-            user_id=user.user_id
+            user_id=user.user_id,
+            parent_id=existing_parent_id,
+            is_root=True if not parent_id else False
         )
         session.add(new_group)
 
-        group_public = GroupPublicGet.model_validate(new_group, from_attributes=True)
+        group_public = GroupPublicModify(
+            group_name=group_name,
+            parent_id=parent_id,
+            group_id=new_group.group_id
+        )
 
         await session.commit()
         return group_public
     
-    async def get_all_groups(self, session: AsyncSession, username: str) -> list[GroupPublicGet]:
-        user: Users = await self.parent.get_user(session, username)
-        if not user:
-            raise ValueError("user does not exist")
-
-        result = await session.exec(
-            select(PasswordGroups)
-            .where(PasswordGroups.user_id == user.user_id)
-        )
-        groups = result.all()
-
-        ta = TypeAdapter(list[GroupPublicGet])
-        models = ta.validate_python(groups, from_attributes=True)
-
-        return models
-    
-    async def delete_group(self, session: AsyncSession, username: str, group_name: str) -> bool:
-        if group_name == 'Root':
-            raise ValueError("Cannot delete Root group")
-        
+    async def get_children_of_root(self, session: AsyncSession, username: str) -> list[GroupPublicGet]:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -299,12 +303,88 @@ class PasswordGroupMethods:
             select(PasswordGroups)
             .where(
                 PasswordGroups.user_id == user.user_id,
-                PasswordGroups.group_name == group_name
+                PasswordGroups.is_root == true()
             )
         )
-        group = result.one_or_none()
+        root_group = result.one()
 
-        if not group:
+        models: list[GroupPublicGet] = []
+        child_models: list[GroupPublicChildren] = []
+
+        await session.refresh(root_group)
+        for child in root_group.child_groups:
+            child_model = GroupPublicChildren(
+                group_name=child.group_name,
+                parent_id=child.parent_id,
+                group_id=child.group_id
+            )
+            child_models.append(child_model)
+        
+        model = GroupPublicGet(
+            group_name=root_group.group_name,
+            parent_id=None,
+            group_id=root_group.group_id,
+            child_groups=child_models
+        )
+
+        models.append(model)
+        return models
+
+    async def get_children_of_group(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> list[GroupPublicGet]:
+        user: Users = await self.parent.get_user(session, username)
+        if not user:
+            raise ValueError("user does not exist")
+
+        result = await session.exec(
+            select(PasswordGroups)
+            .where(
+                PasswordGroups.user_id == user.user_id,
+                PasswordGroups.group_id == group_id
+            )
+        )
+        group = result.one()
+
+        if group.is_root:
+            # Make it so that getting children of /groups/{root_id} is an alias of /groups/
+            return await self.get_children_of_root(session, username)
+        
+        models: list[GroupPublicGet] = []
+        child_models: list[GroupPublicChildren] = []
+
+        await session.refresh(group)
+        for child in group.child_groups:
+            child_model = GroupPublicChildren(
+                group_name=child.group_name,
+                parent_id=child.parent_id,
+                group_id=child.group_id
+            )
+            child_models.append(child_model)
+        
+        model = GroupPublicGet(
+            group_name=group.group_name,
+            parent_id=group.parent_id,
+            group_id=group.group_id,
+            child_groups=child_models
+        )
+
+        models.append(model)
+        return models
+
+    async def delete_group(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> bool:
+        user: Users = await self.parent.get_user(session, username)
+        if not user:
+            raise ValueError("user does not exist")
+
+        result = await session.exec(
+            select(PasswordGroups)
+            .where(
+                PasswordGroups.user_id == user.user_id,
+                PasswordGroups.group_id == group_id
+            )
+        )
+        group = result.one()
+
+        if group.is_root:
             return False
         
         await session.delete(group)
@@ -314,12 +394,9 @@ class PasswordGroupMethods:
 
     async def rename_group(
         self, session: AsyncSession, 
-        username: str, old_name: str, 
+        username: str, group_id: uuid.UUID, 
         new_name: str
-    ) -> GroupPublicGet:
-        if old_name == 'Root' or new_name == 'Root':
-            raise ValueError("Cannot rename Root group")
-        
+    ) -> GroupPublicModify:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -328,23 +405,28 @@ class PasswordGroupMethods:
             select(PasswordGroups)
             .where(
                 PasswordGroups.user_id == user.user_id,
-                PasswordGroups.group_name == old_name
+                PasswordGroups.group_id == group_id
             )
         )
-        group = result.one_or_none()
+        group = result.one()
 
-        if not group:
-            return False
-        
         group.group_name = new_name
         session.add(group)
 
-        group_public = GroupPublicGet.model_validate(group, from_attributes=True)
-        await session.commit()
+        group_public = GroupPublicModify(
+            group_name=new_name,
+            parent_id=group.parent_id,
+            group_id=group.group_id
+        )
 
+        await session.commit()
         return group_public
     
-    async def check_group_exists(self, session: AsyncSession, username: str, group_name: str):
+    async def move_to_new_parent(
+        self, session: AsyncSession,
+        username: str, group_id: uuid.UUID,
+        new_parent_id: uuid.UUID
+    ) -> GroupPublicModify | bool:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -353,11 +435,73 @@ class PasswordGroupMethods:
             select(PasswordGroups)
             .where(
                 PasswordGroups.user_id == user.user_id,
-                PasswordGroups.group_name == group_name
+                PasswordGroups.group_id == group_id
+            )
+        )
+        group = result.one()
+
+        if group.is_root:
+            raise ValueError("group is top-level Root")
+        
+        result = await session.exec(
+            select(PasswordGroups)
+            .where(
+                PasswordGroups.user_id == user.user_id,
+                PasswordGroups.group_id == new_parent_id
+            )
+        )
+        parent_model = result.one_or_none()
+
+        if not parent_model:
+            return False
+        
+        group.parent_id = parent_model.group_id
+        session.add(group)
+
+        group_public = GroupPublicModify(
+            group_name=group.group_name,
+            parent_id=parent_model.group_id,
+            group_id=group.group_id
+        )
+
+        await session.commit()
+        return group_public
+
+    async def check_group_exists(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> bool:
+        user: Users = await self.parent.get_user(session, username)
+        if not user:
+            raise ValueError("user does not exist")
+
+        result = await session.exec(
+            select(PasswordGroups)
+            .where(
+                PasswordGroups.user_id == user.user_id,
+                PasswordGroups.group_id == group_id
             )
         )
         group = result.one_or_none()
         if not group:
+            return False
+        
+        return True
+    
+    async def check_group_is_root(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> bool:
+        user: Users = await self.parent.get_user(session, username)
+        if not user:
+            raise ValueError("user does not exist")
+
+        result = await session.exec(
+            select(PasswordGroups)
+            .where(
+                PasswordGroups.user_id == user.user_id,
+                PasswordGroups.group_id == group_id
+            )
+        )
+        group = result.one()
+        if not group:
+            return False
+        
+        if not group.is_root:
             return False
         
         return True
@@ -370,7 +514,7 @@ class PasswordEntryMethods:
 
     async def create_entry(
         self, session: AsyncSession, 
-        username: str, group_name: str,
+        username: str, group_id: uuid.UUID,
         entry_name: str, entry_data: str
     ) -> EntryPublicGet | bool:
         user: Users = await self.parent.get_user(session, username)
@@ -381,7 +525,7 @@ class PasswordEntryMethods:
             select(PasswordGroups)
             .where(
                 PasswordGroups.user_id == user.user_id,
-                PasswordGroups.group_name == group_name
+                PasswordGroups.group_id == group_id
             )
         )
         group = result.one_or_none()
@@ -401,7 +545,8 @@ class PasswordEntryMethods:
             entry_id=new_entry.entry_id,
             entry_name=entry_name,
             entry_data=entry_data,
-            group_name=group_name
+            group_name=group.group_name,
+            group_id=group_id
         )
 
         await session.commit()
@@ -409,7 +554,7 @@ class PasswordEntryMethods:
     
     async def get_entries_by_group(
         self, session: AsyncSession, 
-        username: str, group_name: str,
+        username: str, group_id: uuid.UUID,
         amount: int = 100, offset: int = 0
     ) -> list[EntryPublicGet] | bool:
         user: Users = await self.parent.get_user(session, username)
@@ -420,18 +565,20 @@ class PasswordEntryMethods:
             select(PasswordGroups)
             .where(
                 PasswordGroups.user_id == user.user_id,
-                PasswordGroups.group_name == group_name
+                PasswordGroups.group_id == group_id
             )
         )
-        group = result.one_or_none()
+        existing_group = result.one_or_none()
 
-        if not group:
+        if not existing_group:
             return False
         
         result = await session.exec(
             select(PasswordEntry, PasswordGroups)
             .join(PasswordGroups)
-            .where(PasswordEntry.group_id == PasswordGroups.group_id)
+            .where(
+                PasswordEntry.group_id == existing_group.group_id
+            )
             .limit(amount)
             .offset(offset)
         )
@@ -443,7 +590,8 @@ class PasswordEntryMethods:
                 entry_name=entry.entry_name,
                 entry_data=entry.entry_data,
                 entry_id=entry.entry_id,
-                group_name=group.group_name
+                group_name=group.group_name,
+                group_id=group.group_id
             )
             entries_public.append(entry_public)
         
@@ -474,6 +622,41 @@ class PasswordEntryMethods:
         await session.commit()
         
         return True
+    
+    async def replace_entry_data(
+        self, session: AsyncSession, 
+        username: str, entry_id: uuid.UUID,
+        entry_data: str
+    ) -> EntryPublicGet | bool:
+        user: Users = await self.parent.get_user(session, username)
+        if not user:
+            raise ValueError("user does not exist")
+
+        result = await session.exec(
+            select(PasswordEntry)
+            .join(PasswordGroups)
+            .where(
+                PasswordGroups.user_id == user.user_id,
+                PasswordEntry.entry_id == entry_id
+            )
+        )
+        entry = result.one_or_none()
+
+        if not entry:
+            return False
         
+        entry.entry_data = entry_data
+        session.add(entry)
+
+        entry_public = EntryPublicGet(
+            entry_id=entry.entry_id,
+            entry_name=entry.entry_name,
+            entry_data=entry_data,
+            group_name=entry.group.group_name,
+            group_id=entry.group.group_id
+        )
+        await session.commit()
+        return entry_public
+
 
 database: MainDatabase = MainDatabase(async_engine)

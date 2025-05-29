@@ -1,29 +1,45 @@
 import uuid
 from typing import Annotated
-from pydantic import BaseModel, AfterValidator, Field
-
-
-def check_is_root(value: str):
-    if value == 'Root':
-        raise ValueError("group_name cannot be 'Root'")
-    
-    return value
+from pydantic import BaseModel, Field
 
 
 GroupName = Annotated[str, Field(min_length=1)]
-CannotBeRoot = Annotated[GroupName, AfterValidator(check_is_root)]
+
 
 class GroupBase(BaseModel):
     group_name: GroupName
+    parent_id: uuid.UUID | None  # None for the top-level group
 
 
 class GroupCreate(GroupBase):
-    group_name: CannotBeRoot
+    group_name: GroupName
+    parent_id: uuid.UUID
 
 
-class GroupPublicGet(GroupBase):
+class GroupPublic(GroupBase):
     group_id: uuid.UUID
 
 
+class GroupPublicModify(GroupPublic):
+    """
+    Leave out `child_groups` list for operations like create and rename.
+    """
+    pass
+
+
+class GroupPublicGet(GroupPublic):
+    child_groups: list['GroupPublicChildren']
+
+
+# Leave out child_groups intentionally
+class GroupPublicChildren(GroupPublic):
+    parent_id: uuid.UUID
+
+
+# Simple models
 class GroupRename(BaseModel):
-    new_name: CannotBeRoot
+    new_name: GroupName
+
+
+class GroupMove(BaseModel):
+    new_parent_id: uuid.UUID
