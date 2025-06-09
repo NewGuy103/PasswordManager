@@ -64,7 +64,6 @@ class UserSessions(SQLModel, table=True):
 
 
 # Self referential model (https://docs.sqlalchemy.org/en/latest/orm/self_referential.html)
-# TODO: Make this self-referential so groups can have child/parent groups
 class PasswordGroups(SQLModel, table=True):
     group_id: uuid.UUID = Field(primary_key=True, default_factory=uuid.uuid4)
     group_name: str = Field(min_length=1, nullable=False, index=True)
@@ -101,7 +100,10 @@ class PasswordEntry(SQLModel, table=True):
     entry_id: uuid.UUID = Field(primary_key=True, default_factory=uuid.uuid4)
     entry_name: str = Field(min_length=1, nullable=False, index=True)
 
-    entry_data: str = Field(min_length=1, nullable=False)
+    entry_username: str = Field(nullable=False, index=True)
+    entry_password: str = Field(nullable=False)
+    
+    entry_url: str = Field(nullable=False)
 
     group_id: uuid.UUID = Field(foreign_key='passwordgroups.group_id', ondelete='CASCADE')
     group: PasswordGroups = Relationship(

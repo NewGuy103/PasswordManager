@@ -13,8 +13,8 @@ group_router = APIRouter(prefix='/{group_id}')
 
 
 @router.get('/')
-async def retrieve_top_level_groups(user: UserAuthDep, session: SessionDep) -> list[GroupPublicGet]:
-    groups: list[GroupPublicGet] = await database.groups.get_children_of_root(session, user.username)
+async def retrieve_top_level_groups(user: UserAuthDep, session: SessionDep) -> GroupPublicGet:
+    groups: GroupPublicGet = await database.groups.get_children_of_root(session, user.username)
     return groups
 
 
@@ -56,8 +56,8 @@ async def rename_group(
 async def get_group_children(
     group_id: CheckGroupValidDep, 
     user: UserAuthDep, session: SessionDep
-) -> list[GroupPublicGet]:
-    groups: list[GroupPublicGet] = await database.groups.get_children_of_group(
+) -> GroupPublicGet:
+    groups: GroupPublicGet = await database.groups.get_children_of_group(
         session, user.username, group_id
     )
     return groups

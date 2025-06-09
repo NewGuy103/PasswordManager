@@ -12,7 +12,14 @@ from ..internal.database import database
 router = APIRouter(prefix='/auth', tags=['auth'])
 
 
-@router.post('/token', response_model=AccessTokenResponse)
+@router.post(
+    '/token', 
+    response_model=AccessTokenResponse,
+    responses={
+        400: {'model': AccessTokenError},
+        401: {'model': AccessTokenError}
+    }
+)
 async def token_login(
     form_data: Annotated[OAuth2PasswordRequestFormStrict, Depends()],
     logger: LoggerDep, session: SessionDep

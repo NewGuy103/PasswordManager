@@ -26,7 +26,7 @@ if typing.TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 
-logger: logging.Logger = logging.getLogger("syncserver")
+logger: logging.Logger = logging.getLogger("password_manager")
 async_engine: 'AsyncEngine' = create_async_engine(
     str(settings.SQLALCHEMY_DATABASE_URI),
     poolclass=AsyncAdaptedQueuePool,
@@ -294,7 +294,7 @@ class PasswordGroupMethods:
         await session.commit()
         return group_public
     
-    async def get_children_of_root(self, session: AsyncSession, username: str) -> list[GroupPublicGet]:
+    async def get_children_of_root(self, session: AsyncSession, username: str) -> GroupPublicGet:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -307,8 +307,6 @@ class PasswordGroupMethods:
             )
         )
         root_group = result.one()
-
-        models: list[GroupPublicGet] = []
         child_models: list[GroupPublicChildren] = []
 
         await session.refresh(root_group)
@@ -327,10 +325,9 @@ class PasswordGroupMethods:
             child_groups=child_models
         )
 
-        models.append(model)
-        return models
+        return model
 
-    async def get_children_of_group(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> list[GroupPublicGet]:
+    async def get_children_of_group(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> GroupPublicGet:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -348,10 +345,9 @@ class PasswordGroupMethods:
             # Make it so that getting children of /groups/{root_id} is an alias of /groups/
             return await self.get_children_of_root(session, username)
         
-        models: list[GroupPublicGet] = []
         child_models: list[GroupPublicChildren] = []
-
         await session.refresh(group)
+
         for child in group.child_groups:
             child_model = GroupPublicChildren(
                 group_name=child.group_name,
@@ -367,8 +363,7 @@ class PasswordGroupMethods:
             child_groups=child_models
         )
 
-        models.append(model)
-        return models
+        return model
 
     async def delete_group(self, session: AsyncSession, username: str, group_id: uuid.UUID) -> bool:
         user: Users = await self.parent.get_user(session, username)
@@ -515,8 +510,9 @@ class PasswordEntryMethods:
     async def create_entry(
         self, session: AsyncSession, 
         username: str, group_id: uuid.UUID,
-        entry_name: str, entry_data: str
-    ) -> EntryPublicGet | bool:
+        entry_name: str, entry_username: str,
+        entry_password: str, entry_url: str
+    ) -> EntryPublicGet:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -528,25 +524,20 @@ class PasswordEntryMethods:
                 PasswordGroups.group_id == group_id
             )
         )
-        group = result.one_or_none()
+        group = result.one()
 
-        if not group:
-            return False
-        
         # TODO: Encrypt password entries so its safer in the database
         new_entry = PasswordEntry(
-            entry_name=entry_name,
-            entry_data=entry_data,
+            entry_name=entry_name, entry_username=entry_username,
+            entry_password=entry_password, entry_url=entry_url,
             group_id=group.group_id
         )
         session.add(new_entry)
 
         entry_public = EntryPublicGet(
-            entry_id=new_entry.entry_id,
-            entry_name=entry_name,
-            entry_data=entry_data,
-            group_name=group.group_name,
-            group_id=group_id
+            entry_id=new_entry.entry_id, entry_name=entry_name,
+            entry_username=entry_username, entry_password=entry_password,
+            entry_url=entry_url, group_id=group_id
         )
 
         await session.commit()
@@ -556,7 +547,7 @@ class PasswordEntryMethods:
         self, session: AsyncSession, 
         username: str, group_id: uuid.UUID,
         amount: int = 100, offset: int = 0
-    ) -> list[EntryPublicGet] | bool:
+    ) -> list[EntryPublicGet]:
         user: Users = await self.parent.get_user(session, username)
         if not user:
             raise ValueError("user does not exist")
@@ -568,11 +559,8 @@ class PasswordEntryMethods:
                 PasswordGroups.group_id == group_id
             )
         )
-        existing_group = result.one_or_none()
+        existing_group = result.one()
 
-        if not existing_group:
-            return False
-        
         result = await session.exec(
             select(PasswordEntry, PasswordGroups)
             .join(PasswordGroups)
@@ -587,11 +575,9 @@ class PasswordEntryMethods:
         entries_public: list[EntryPublicGet] = []
         for entry, group in entries:
             entry_public = EntryPublicGet(
-                entry_name=entry.entry_name,
-                entry_data=entry.entry_data,
-                entry_id=entry.entry_id,
-                group_name=group.group_name,
-                group_id=group.group_id
+                entry_name=entry.entry_name, entry_username=entry.entry_username,
+                entry_password=entry.entry_password, entry_url=entry.entry_url,
+                entry_id=entry.entry_id, group_id=group.group_id
             )
             entries_public.append(entry_public)
         
@@ -623,10 +609,11 @@ class PasswordEntryMethods:
         
         return True
     
-    async def replace_entry_data(
+    async def update_entry_data(
         self, session: AsyncSession, 
         username: str, entry_id: uuid.UUID,
-        entry_data: str
+        entry_name: str, entry_username: str,
+        entry_password: str, entry_url: str
     ) -> EntryPublicGet | bool:
         user: Users = await self.parent.get_user(session, username)
         if not user:
@@ -645,15 +632,18 @@ class PasswordEntryMethods:
         if not entry:
             return False
         
-        entry.entry_data = entry_data
+        entry.entry_name = entry_name
+        entry.entry_username = entry_username
+
+        entry.entry_password = entry_password
+        entry.entry_url = entry_url
+
         session.add(entry)
 
         entry_public = EntryPublicGet(
-            entry_id=entry.entry_id,
-            entry_name=entry.entry_name,
-            entry_data=entry_data,
-            group_name=entry.group.group_name,
-            group_id=entry.group.group_id
+            entry_id=entry.entry_id, entry_name=entry_name,
+            entry_username=entry_username, entry_password=entry_password,
+            entry_url=entry_url, group_id=entry.group.group_id
         )
         await session.commit()
         return entry_public
